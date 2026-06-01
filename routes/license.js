@@ -58,8 +58,8 @@ router.post('/activate', async (req, res) => {
     );
     await db.log(keyHash, deviceId, ip, 'reactivate', 'ok', deviceName||'');
     return res.json({ success: true, type: keyRecord.type, email: emailLc,
-      daysLeft: getDaysLeft(existing.activated_at || keyRecord.issued_at, keyRecord.type, keyRecord.trial_days),
-      activatedAt: existing.activated_at || Date.now(), token, message: 'License verified' });
+      daysLeft: getDaysLeft(keyRecord.issued_at, keyRecord.type, keyRecord.trial_days),
+      activatedAt: parseInt(existing.activated_at) || Date.now(), token, message: 'License verified' });
   }
 
   const activeDevices = await db.all('SELECT * FROM activations WHERE key_hash = $1 AND is_revoked = 0', [keyHash]);
@@ -75,11 +75,13 @@ router.post('/activate', async (req, res) => {
     [keyHash, deviceId, deviceName||'Unknown Device', deviceFp||'', appVersion||'1.0.0', Date.now(), Date.now(), hashToken(token)]
   );
   await db.log(keyHash, deviceId, ip, 'activate', 'ok', deviceName||'');
-  const now2 = Date.now();
-  const daysLeft = getDaysLeft(now2, keyRecord.type, keyRecord.trial_days);
+  const activatedNow = Date.now();
+  const daysLeft = getDaysLeft(keyRecord.issued_at, keyRecord.type, keyRecord.trial_days);
   console.log('[ACTIVATED]', key, '|', emailLc, '|', deviceName, '|', ip);
-  return res.json({ success: true, type: keyRecord.type, email: emailLc, daysLeft,
-    activatedAt: now2, token,
+  return res.json({ success: true, type: keyRecord.type, email: emailLc,
+    daysLeft: daysLeft,
+    activatedAt: activatedNow,
+    token,
     message: keyRecord.type === 'full' ? 'Full license activated!' : 'Trial: ' + daysLeft + ' day(s) remaining.' });
 });
 
