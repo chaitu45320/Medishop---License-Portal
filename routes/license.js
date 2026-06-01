@@ -1,127 +1,81 @@
 /**
- * routes/license.js — MediShop
- * POST /api/activate
- * POST /api/validate
- * POST /api/deactivate
+ * utils/license.js
+ * MediShop Key generation, HMAC hashing, JWT token signing/verification
  */
-const express = require('express');
-const router  = express.Router();
-const db      = require('../models/db');
-const { validateKey, hashKey, hashToken, signToken, verifyToken, getDaysLeft, isTrialExpired } = require('../utils/license');
+const crypto = require('crypto');
+const jwt    = require('jsonwebtoken');
 
-router.post('/activate', async (req, res) => {
-  const { licenseKey, email, deviceId, deviceName, deviceFp, appVersion } = req.body;
-  const ip = req.ip || '';
+const SECRET_KEY = process.env.LICENSE_SECRET || 'MS@MediShop#2024!PharmacyBilling$Key@Secure99';
+const JWT_SECRET = process.env.JWT_SECRET     || 'MS_JWT_MediShop_2024_Ultra_Secure_Key_99';
+const APP_PREFIX = 'MEDSHP';
+const CHARS      = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+const TRIAL_DAYS = parseInt(process.env.TRIAL_DAYS || '7');
 
-  if (!licenseKey) return res.status(400).json({ success: false, error: 'License key is required' });
-  if (!email)      return res.status(400).json({ success: false, error: 'Email is required' });
-  if (!deviceId)   return res.status(400).json({ success: false, error: 'Device ID is required' });
+function randSeg(prefix) {
+  let r = prefix || '';
+  while (r.length < 6) r += CHARS[Math.floor(Math.random() * CHARS.length)];
+  return r.substring(0, 6);
+}
 
-  const key = licenseKey.trim().toUpperCase();
-  const v   = validateKey(key);
-  if (!v.valid) {
-    await db.log('', deviceId, ip, 'activate', 'fail', 'Invalid key: ' + v.reason);
-    return res.status(400).json({ success: false, error: 'Invalid license key: ' + v.reason });
-  }
+function hmacSeg(data, len) {
+  const bytes = crypto.createHmac('sha256', SECRET_KEY).update(data).digest();
+  let r = '';
+  for (let i = 0; i < bytes.length && r.length < len; i++)
+    r += CHARS[bytes[i] % CHARS.length];
+  return r;
+}
 
-  const keyHash = hashKey(key);
-  const emailLc = email.trim().toLowerCase();
-  const keyRecord = await db.get('SELECT * FROM license_keys WHERE key_hash = $1', [keyHash]);
+function generateKey(type) {
+  const typeCode = type === 'full' ? 'FULL' : 'TRAL';
+  const typeFlag = type === 'full' ? 'F'    : 'T';
+  const seg1 = randSeg(typeFlag);
+  const seg2 = randSeg();
+  const seg3 = hmacSeg(seg1 + '-' + seg2, 6);
+  return APP_PREFIX + '-' + typeCode + '-' + seg1 + '-' + seg2 + '-' + seg3;
+}
 
-  if (!keyRecord) {
-    await db.log(keyHash, deviceId, ip, 'activate', 'fail_notfound', 'Key not found');
-    return res.status(404).json({ success: false, error: 'License key not found. Contact Cloud Sprint: 9985223448' });
-  }
-  if (!keyRecord.is_active) {
-    await db.log(keyHash, deviceId, ip, 'activate', 'fail_revoked', 'Key revoked');
-    return res.status(403).json({ success: false, error: 'This license has been revoked. Contact Cloud Sprint.' });
-  }
-  if (keyRecord.email !== emailLc) {
-    await db.log(keyHash, deviceId, ip, 'activate', 'fail_email', 'Email mismatch');
-    return res.status(403).json({ success: false, error: 'This key is registered to a different email address.' });
-  }
-  if (keyRecord.type === 'trial' && isTrialExpired(keyRecord.issued_at, keyRecord.trial_days)) {
-    await db.log(keyHash, deviceId, ip, 'activate', 'fail_expired', 'Trial expired');
-    return res.status(403).json({ success: false, error: 'Trial license has expired. Contact Cloud Sprint: 9985223448' });
-  }
+function validateKey(licenseKey) {
+  const parts = licenseKey.trim().toUpperCase().split('-');
+  if (parts.length !== 5)                       return { valid: false, reason: 'Invalid format (need 5 segments)' };
+  if (parts[0] !== APP_PREFIX)                  return { valid: false, reason: 'Key must start with MEDSHP' };
+  if (!['FULL','TRAL'].includes(parts[1]))      return { valid: false, reason: 'Invalid license type' };
+  if ([parts[2],parts[3],parts[4]].some(s => s.length !== 6))
+                                                return { valid: false, reason: 'Each segment must be 6 characters' };
+  const [, typeCode, seg1, seg2, seg3] = parts;
+  if (seg3 !== hmacSeg(seg1 + '-' + seg2, 6))  return { valid: false, reason: 'Key checksum mismatch' };
+  if (typeCode === 'FULL' && seg1[0] !== 'F')   return { valid: false, reason: 'Type flag mismatch' };
+  if (typeCode === 'TRAL' && seg1[0] !== 'T')   return { valid: false, reason: 'Type flag mismatch' };
+  return { valid: true, type: typeCode === 'FULL' ? 'full' : 'trial' };
+}
 
-  const existing = await db.get('SELECT * FROM activations WHERE key_hash = $1 AND device_id = $2', [keyHash, deviceId]);
-  if (existing) {
-    if (existing.is_revoked) {
-      await db.log(keyHash, deviceId, ip, 'activate', 'fail_device_revoked', 'Device revoked');
-      return res.status(403).json({ success: false, error: 'This device has been revoked. Contact Cloud Sprint.' });
-    }
-    const token = signToken({ keyHash, deviceId, type: keyRecord.type, email: emailLc });
-    await db.run(
-      'UPDATE activations SET last_seen=$1, token_hash=$2, device_name=$3, app_version=$4 WHERE key_hash=$5 AND device_id=$6',
-      [Date.now(), hashToken(token), deviceName||existing.device_name, appVersion||existing.app_version, keyHash, deviceId]
-    );
-    await db.log(keyHash, deviceId, ip, 'reactivate', 'ok', deviceName||'');
-    return res.json({ success: true, type: keyRecord.type, email: emailLc,
-      daysLeft: getDaysLeft(keyRecord.issued_at, keyRecord.type, keyRecord.trial_days),
-      activatedAt: parseInt(existing.activated_at) || Date.now(), token, message: 'License verified' });
-  }
+function hashKey(key) {
+  return crypto.createHmac('sha256', SECRET_KEY).update(key.toUpperCase()).digest('hex');
+}
 
-  const activeDevices = await db.all('SELECT * FROM activations WHERE key_hash = $1 AND is_revoked = 0', [keyHash]);
-  if (activeDevices.length >= keyRecord.max_devices) {
-    const names = activeDevices.map(d => d.device_name || d.device_id).join(', ');
-    await db.log(keyHash, deviceId, ip, 'activate', 'fail_limit', 'Devices: ' + names);
-    return res.status(409).json({ success: false, error: 'License already active on ' + activeDevices.length + ' device(s): ' + names + '. Contact Cloud Sprint: 9985223448', code: 'DEVICE_LIMIT' });
-  }
+function hashToken(token) {
+  return crypto.createHash('sha256').update(token).digest('hex');
+}
 
-  const token = signToken({ keyHash, deviceId, type: keyRecord.type, email: emailLc });
-  await db.run(
-    'INSERT INTO activations (key_hash,device_id,device_name,device_fp,app_version,activated_at,last_seen,token_hash) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)',
-    [keyHash, deviceId, deviceName||'Unknown Device', deviceFp||'', appVersion||'1.0.0', Date.now(), Date.now(), hashToken(token)]
-  );
-  await db.log(keyHash, deviceId, ip, 'activate', 'ok', deviceName||'');
-  const activatedNow = Date.now();
-  const daysLeft = getDaysLeft(keyRecord.issued_at, keyRecord.type, keyRecord.trial_days);
-  console.log('[ACTIVATED]', key, '|', emailLc, '|', deviceName, '|', ip);
-  return res.json({ success: true, type: keyRecord.type, email: emailLc,
-    daysLeft: daysLeft,
-    activatedAt: activatedNow,
-    token,
-    message: keyRecord.type === 'full' ? 'Full license activated!' : 'Trial: ' + daysLeft + ' day(s) remaining.' });
-});
+function signToken(payload) {
+  return jwt.sign(payload, JWT_SECRET, { expiresIn: '365d' });
+}
 
-router.post('/validate', async (req, res) => {
-  const { token, deviceId } = req.body;
-  const ip = req.ip || '';
-  if (!token || !deviceId) return res.status(400).json({ success: false, error: 'token and deviceId required' });
-  const payload = verifyToken(token);
-  if (!payload || payload.deviceId !== deviceId) {
-    await db.log('', deviceId, ip, 'validate', 'fail', 'Invalid JWT');
-    return res.status(401).json({ success: false, error: 'Invalid token' });
-  }
-  const { keyHash } = payload;
-  const activation = await db.get('SELECT * FROM activations WHERE key_hash = $1 AND device_id = $2', [keyHash, deviceId]);
-  if (!activation || activation.is_revoked) {
-    await db.log(keyHash, deviceId, ip, 'validate', 'fail', 'Not activated or revoked');
-    return res.status(401).json({ success: false, error: 'Device not authorized' });
-  }
-  const keyRecord = await db.get('SELECT * FROM license_keys WHERE key_hash = $1', [keyHash]);
-  if (!keyRecord || !keyRecord.is_active) {
-    await db.log(keyHash, deviceId, ip, 'validate', 'fail', 'Key inactive');
-    return res.status(403).json({ success: false, error: 'License deactivated' });
-  }
-  if (keyRecord.type === 'trial' && isTrialExpired(keyRecord.issued_at, keyRecord.trial_days)) {
-    await db.log(keyHash, deviceId, ip, 'validate', 'fail', 'Trial expired');
-    return res.status(403).json({ success: false, error: 'Trial expired' });
-  }
-  await db.run('UPDATE activations SET last_seen=$1 WHERE key_hash=$2 AND device_id=$3', [Date.now(), keyHash, deviceId]);
-  await db.log(keyHash, deviceId, ip, 'validate', 'ok', '');
-  return res.json({ success: true, type: keyRecord.type, email: keyRecord.email, daysLeft: getDaysLeft(keyRecord.issued_at, keyRecord.type, keyRecord.trial_days), valid: true });
-});
+function verifyToken(token) {
+  try { return jwt.verify(token, JWT_SECRET); }
+  catch(e) { return null; }
+}
 
-router.post('/deactivate', async (req, res) => {
-  const { token, deviceId } = req.body;
-  if (!token || !deviceId) return res.status(400).json({ success: false, error: 'token and deviceId required' });
-  const payload = verifyToken(token);
-  if (!payload || payload.deviceId !== deviceId) return res.status(401).json({ success: false, error: 'Invalid token' });
-  await db.run('DELETE FROM activations WHERE key_hash=$1 AND device_id=$2', [payload.keyHash, deviceId]);
-  await db.log(payload.keyHash, deviceId, req.ip||'', 'deactivate', 'ok', 'Self deactivated');
-  return res.json({ success: true, message: 'Device deactivated.' });
-});
+function getDaysLeft(activatedAt, type, trialDays) {
+  if (type === 'full') return null;
+  const at = parseInt(activatedAt) || Date.now(); // parse string from PostgreSQL
+  const days = parseInt(trialDays) || TRIAL_DAYS;
+  return Math.max(0, Math.ceil((at + days * 86400000 - Date.now()) / 86400000));
+}
 
-module.exports = router;
+function isTrialExpired(activatedAt, trialDays) {
+  const at = parseInt(activatedAt) || Date.now();
+  const days = parseInt(trialDays) || TRIAL_DAYS;
+  return Date.now() > at + days * 86400000;
+}
+
+module.exports = { generateKey, validateKey, hashKey, hashToken, signToken, verifyToken, getDaysLeft, isTrialExpired, TRIAL_DAYS, APP_PREFIX };
