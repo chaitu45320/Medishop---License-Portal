@@ -1,8 +1,0 @@
-{
-  "name": "medishop-license-server",
-  "version": "4.0.0",
-  "main": "server.js",
-  "scripts": { "start": "node server.js" },
-  "dependencies": { "express": "^4.21.2", "jsonwebtoken": "^9.0.2", "pg": "^8.11.3" },
-  "engines": { "node": ">=16" }
-}
