@@ -130,10 +130,13 @@ function trialExpired(at, type) {
   return Date.now() > at + TRIAL_DAYS*86400000;
 }
 function adminAuth(req, res, next) {
-  const t = (req.headers['authorization']||'').replace('Bearer ','').trim()
+  const raw = (req.headers['authorization']||'').replace('Bearer ','').trim()
     || (req.headers['x-admin-key']||'').trim()
     || (req.query.token||'').trim();
-  if (t === API_SECRET || t === ADMIN_KEY) { next(); return; }
+  // Decode URI encoding (%40 -> @) for URL token comparison
+  let t = raw;
+  try { t = decodeURIComponent(raw); } catch(e) { t = raw; }
+  if (t === API_SECRET || t === ADMIN_KEY || raw === API_SECRET || raw === ADMIN_KEY) { next(); return; }
   res.status(401).json({ success: false, error: 'Unauthorized' });
 }
 function enrich(kh, kr, db) {
@@ -310,7 +313,9 @@ app.get('/admin/export', adminAuth, (req,res) => {
 app.get('/', (req,res) => {
   if (req.query.signout) return res.redirect('/');
   const tok = (req.query.token||req.headers['x-admin-key']||'').trim();
-  if (tok !== API_SECRET && tok !== ADMIN_KEY) {
+  let tokDecoded = tok;
+  try { tokDecoded = decodeURIComponent(tok); } catch(e) {}
+  if (tokDecoded !== API_SECRET && tok !== API_SECRET && tokDecoded !== ADMIN_KEY && tok !== ADMIN_KEY) {
     return res.status(401).send('<!DOCTYPE html><html><head><title>MediShop</title><meta charset="UTF-8"/>'
       +'<style>*{margin:0;padding:0;box-sizing:border-box}body{background:#060d19;color:#e2e8f0;font-family:sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;flex-direction:column;gap:16px;text-align:center;padding:24px}'
       +'h2{color:#00c9a7}code{background:#0c1a2e;padding:4px 10px;border-radius:6px;font-family:monospace;color:#7dd3fc}</style></head>'
@@ -524,9 +529,9 @@ tr:hover td{background:rgba(0,201,167,.025)}
 </div>
 
 <script>
-var SEC = (location.search.match(/[?&]token=([^&]*)/) || [])[1] || "";
+var _rawToken = (location.search.match(/[?&]token=([^&]*)/) || [])[1] || "";
+var SEC = _rawToken ? decodeURIComponent(_rawToken) : "";
 var BASE = location.origin;
-// If no token in URL, prompt for it
 if (!SEC) { SEC = prompt("Enter admin token:") || ""; }
 
 function goTab(t) {
