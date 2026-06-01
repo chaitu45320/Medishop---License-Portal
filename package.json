@@ -1,0 +1,21 @@
+{
+  "name": "medishop-license-server",
+  "version": "3.0.0",
+  "description": "MediShop Pharmacy Billing — License Server — Cloud Sprint",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev":   "node index.js"
+  },
+  "dependencies": {
+    "dotenv":             "^16.4.5",
+    "express":            "^4.21.2",
+    "express-rate-limit": "^7.4.1",
+    "helmet":             "^8.0.0",
+    "jsonwebtoken":       "^9.0.2",
+    "pg":                 "^8.11.3"
+  },
+  "engines": { "node": ">=16" },
+  "author": "Cloud Sprint <contact@cloudsprint.in>",
+  "license": "UNLICENSED"
+}
